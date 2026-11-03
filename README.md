@@ -15,7 +15,7 @@
 
 | 组件 | 版本 / 来源 | 说明 |
 | --- | --- | --- |
-| AUTOMATIC1111 WebUI | `dev` 分支，固定提交 `1937682a`（v1.10.1） | 主程序，运行时从 GitHub 克隆，不随仓库分发 |
+| AUTOMATIC1111 WebUI | `dev` 分支，固定提交 `1937682a`（v1.10.1） | 主程序，运行时获取；`git clone` 失败会自动改用 codeload ZIP，不随仓库分发 |
 | Python | 3.10.11 embeddable | 便携版，解压到 `_python310\`，不污染系统 Python |
 | PyTorch | 2.7.0 + cu128 / torchvision 0.22.0 | 支持 RTX 50 系（sm_120 / Blackwell） |
 | 基础模型 | SD 1.5 `v1-5-pruned-emaonly.safetensors` | 4.27 GB，ModelScope 镜像 |
@@ -36,7 +36,7 @@
 - NVIDIA 显卡与驱动：
   - 推荐驱动 **570 或更高**（CUDA 12.8）
   - 显存 **8 GB 起**；6 GB 可以跑 512×512 文生图，但 AnimateDiff 需要降低分辨率/帧数
-- 能访问 GitHub（克隆 WebUI 和扩展）以及国内镜像（SJTU / 华为云 / ModelScope / 清华 PyPI）
+- 能访问 GitHub（`git clone` 或 `codeload.github.com` ZIP 任一可用；脚本会自动回退）以及国内镜像（SJTU / 华为云 / ModelScope / 清华 PyPI）
 
 没有 NVIDIA 显卡也可以 `-Cpu` 安装 CPU 版 PyTorch，但生成速度会非常慢，不推荐日常使用。
 
@@ -51,7 +51,7 @@ git clone https://github.com/Dragon-ts/sd-webui-oneclick-cn.git
 cd sd-webui-oneclick-cn
 ```
 
-也可以直接在 GitHub 页面点 **Code → Download ZIP** 解压。ZIP 方式没有 `.git`，不影响安装（WebUI 会单独克隆）。
+也可以直接在 GitHub 页面点 **Code → Download ZIP** 解压。ZIP 方式没有 `.git`，不影响安装；WebUI 和扩展若 `git clone` 失败，会自动改用 codeload ZIP。
 
 ### 2. 运行安装
 
@@ -71,10 +71,10 @@ install.bat
 
 1. 检查 64 位系统、Git、显卡和磁盘空间
 2. 下载并解压 Python 3.10.11
-3. 引导 pip，克隆 A1111 WebUI 并切到固定提交
+3. 引导 pip，获取 A1111 WebUI（`git clone`，失败则 codeload ZIP）并切到固定提交
 4. 安装 PyTorch 2.7.0 + cu128（约 3.3 GB）
 5. 安装 WebUI 依赖、CLIP、AnimateDiff 依赖
-6. 克隆 AnimateDiff 与中文语言包
+6. 安装 AnimateDiff 与中文语言包（同样支持 ZIP 回退）
 7. 下载 SD1.5（约 4.0 GB）和运动模块（约 1.7 GB）
 8. 预置 CLIP 缓存（约 1.7 GB）
 9. 写入 `config.json`，生成 `start_sd.bat`
@@ -100,6 +100,7 @@ install.bat -InstallDir D:\sd\webui -CacheDir D:\sd\cache
 install.bat -MotionModulePath D:\models\mm_sd_v15_v2.ckpt
 install.bat -SkipModels -SkipClipCache
 install.bat -Cpu
+install.bat -ForceZip
 install.bat -CheckOnly
 ```
 
@@ -114,6 +115,7 @@ install.bat -CheckOnly
 | `-SkipMotionModule` | 关 | 不下载 AnimateDiff 运动模块 |
 | `-SkipClipCache` | 关 | 不预置 CLIP 缓存（首次加载可能联网） |
 | `-Cpu` | 关 | 安装 CPU 版 PyTorch（很慢） |
+| `-ForceZip` | 关 | 跳过 `git clone`，直接用 codeload ZIP 获取 WebUI 和扩展 |
 | `-CheckOnly` | 关 | 只打印解析后的路径，不做修改 |
 | `-Launch` | 关 | 安装完成后直接启动 WebUI |
 | `-NoPause` | 关 | 出错时不等待回车（适合自动化） |
@@ -227,17 +229,19 @@ New-NetFirewallRule -DisplayName "SD WebUI 7860" `
 
 ### 卡在 `git clone` / `Failed to connect to github.com:443 over proxy`
 
-脚本检测到克隆失败后，会清空 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY` 并用 `-c http.proxy=` 重试一次。如果仍然失败：
+脚本检测到克隆失败后，会先清空 `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY` 并用 `-c http.proxy=` 重试一次。仍然失败时会自动改用 `codeload.github.com` 的 ZIP 下载 WebUI 和两个扩展；也可以主动加 `-ForceZip` 跳过 git：
 
-1. 确认代理软件正在运行，或关闭系统代理后重试
-2. 在 CMD 里临时清空代理再运行：
-   ```bat
-   set HTTP_PROXY=
-   set HTTPS_PROXY=
-   set ALL_PROXY=
-   install.bat
-   ```
-3. 如果 GitHub 完全不可用，需要先解决网络问题；A1111 和扩展必须从 GitHub 克隆
+```bat
+install.bat -ForceZip
+```
+
+如果 ZIP 也失败：
+
+1. 用浏览器打开 `https://codeload.github.com/AUTOMATIC1111/stable-diffusion-webui/zip/refs/heads/dev`，确认能否下载
+2. 确认代理软件正在运行，或关闭系统代理后重试
+3. 如果 GitHub 完全不可用，需要先解决网络问题；脚本需要 git 或 codeload 至少一个可用
+
+ZIP 安装没有 `.git`，不影响生成图片，但之后不能用 `git pull` 更新 WebUI；重新运行安装脚本会复用已有目录。
 
 ### 下载到一半失败
 

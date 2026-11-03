@@ -39,6 +39,10 @@
 .PARAMETER Cpu
   Install CPU PyTorch instead of CUDA 12.8 (slow, but works without NVIDIA).
 
+.PARAMETER ForceZip
+  Skip git clone and fetch WebUI/extensions as codeload ZIP archives. Useful on
+  networks where github.com:443 is reset but codeload.github.com works.
+
 .PARAMETER CheckOnly
   Print the resolved paths and exit without changing anything.
 #>
@@ -53,6 +57,7 @@ param(
     [switch]$SkipMotionModule,
     [switch]$SkipClipCache,
     [switch]$Cpu,
+    [switch]$ForceZip,
     [switch]$CheckOnly,
     [switch]$Launch,
     [switch]$NoPause
@@ -92,6 +97,18 @@ $TorchVisUrl = "https://mirror.sjtu.edu.cn/pytorch-wheels/cu128/torchvision-0.22
 $SdUrl   = "https://modelscope.cn/models/AI-ModelScope/stable-diffusion-v1-5/resolve/master/v1-5-pruned-emaonly.safetensors"
 $ClipBase = "https://modelscope.cn/models/AI-ModelScope/clip-vit-large-patch14/resolve/master/"
 $MmUrl   = "https://hf-mirror.com/guoyww/animatediff/resolve/main/mm_sd_v15_v2.ckpt"
+
+# Full SHA for the pinned dev commit; codeload accepts full SHAs but not short ones.
+$WebUiCommitFull = "1937682a20f7f0442311a1ede68f9f0cb480163b"
+$WebUiZip = if ($WebUiCommit -eq "1937682a") {
+    "https://codeload.github.com/AUTOMATIC1111/stable-diffusion-webui/zip/$WebUiCommitFull"
+} elseif ($WebUiCommit) {
+    "https://codeload.github.com/AUTOMATIC1111/stable-diffusion-webui/zip/$WebUiCommit"
+} else {
+    "https://codeload.github.com/AUTOMATIC1111/stable-diffusion-webui/zip/refs/heads/dev"
+}
+$AdZip = "https://codeload.github.com/continue-revolution/sd-webui-animatediff/zip/refs/heads/master"
+$ZhZip = "https://codeload.github.com/dtlnor/stable-diffusion-webui-localization-zh_CN/zip/refs/heads/Anne"
 
 $env:PIP_INDEX_URL = $PipIndex
 $env:PIP_TRUSTED_HOST = $PipHost
@@ -168,6 +185,28 @@ function Invoke-Pip {
     if ($LASTEXITCODE -ne 0) { throw "pip 失败 ($What), exit $LASTEXITCODE" }
 }
 
+function Invoke-PythonProbe {
+    param([string]$Code)
+    # PowerShell 5.1 turns native stderr into an ErrorRecord. With the global
+    # ErrorActionPreference=Stop that would abort the installer the first time
+    # torch is missing, so probe with Continue and merge stderr into the output.
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $out = & $Python -c $Code 2>&1
+        $exit = $LASTEXITCODE
+        return [pscustomobject]@{ ExitCode = $exit; Output = (($out | Out-String).Trim()) }
+    } finally {
+        $ErrorActionPreference = $old
+    }
+}
+
+function Get-JsonLine {
+    param([string]$Text)
+    if (-not $Text) { return $null }
+    return ($Text -split "`r?`n" | Where-Object { $_ -match '^\s*\{' } | Select-Object -Last 1)
+}
+
 function Invoke-GitClone {
     param([string]$Url, [string]$Dest, [string[]]$Extra = @())
     $gitArgs = @("clone", "--depth", "1") + $Extra + @($Url, $Dest)
@@ -195,6 +234,36 @@ function Test-FileSize {
     param([string]$Path, [long]$Expected)
     if (-not (Test-Path $Path)) { return $false }
     return ((Get-Item $Path).Length -eq $Expected)
+}
+
+# Fallback for networks where github.com:443 is reset but codeload.github.com works.
+# Downloads a branch/commit ZIP and copies its single top-level folder into $Dest.
+function Get-GitHubZip {
+    param([string]$Url, [string]$Dest)
+    $leaf = ($Url -split '/')[-1]
+    $zip = Join-Path $Downloads ("gh-" + $leaf + ".zip")
+    Get-RemoteFile $Url $zip 10000
+    $tmp = Join-Path $Downloads ("gh-extract-" + [guid]::NewGuid().ToString("N"))
+    $expanded = $false
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        try {
+            Expand-Archive -Path $zip -DestinationPath $tmp -Force -ErrorAction Stop
+            $expanded = $true
+            break
+        } catch {
+            if ($attempt -ge 2) { throw }
+            Write-Warn "ZIP 解压失败，删除后重新下载: $Url"
+            Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+            Get-RemoteFile $Url $zip 10000
+        }
+    }
+    if (-not $expanded) { throw "ZIP 解压失败: $Url" }
+    $top = Get-ChildItem -LiteralPath $tmp -Directory -Force | Select-Object -First 1
+    if (-not $top) { throw "ZIP 内容为空: $Url" }
+    New-Item -ItemType Directory -Force -Path $Dest | Out-Null
+    Get-ChildItem -LiteralPath $top.FullName -Force | Copy-Item -Destination $Dest -Recurse -Force
+    Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # ---------------------------------------------------------------------------
@@ -250,7 +319,7 @@ $gpuName = $null
 $driver = $null
 if (Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue) {
     try {
-        $smi = & nvidia-smi.exe --query-gpu=name,driver_version --format=csv,noheader 2>$null | Select-Object -First 1
+        $smi = & nvidia-smi.exe --query-gpu=name,driver_version --format=csv,noheader | Select-Object -First 1
         if ($smi) {
             $parts = $smi -split ","
             $gpuName = $parts[0].Trim()
@@ -278,7 +347,7 @@ New-Item -ItemType Directory -Force -Path $Downloads | Out-Null
 # ---------------------------------------------------------------------------
 Write-Step "准备 Python 3.10.11"
 if (Test-Path $Python) {
-    $pyVer = & $Python -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
+    $pyVer = & $Python -c "import sys; print('%d.%d' % sys.version_info[:2])"
     if ($LASTEXITCODE -ne 0 -or $pyVer -ne "3.10") {
         Fail "现有 Python 不是 3.10 ($pyVer)。请删除 $PythonDir 后重试。"
     }
@@ -327,25 +396,46 @@ if ($LASTEXITCODE -ne 0) { Fail "pip 无法运行。" }
 # 4. WebUI checkout
 # ---------------------------------------------------------------------------
 Write-Step "获取 AUTOMATIC1111 WebUI (dev)"
+$zipInstall = $false
 if (Test-Path (Join-Path $InstallDir "launch.py")) {
     Write-Ok "WebUI 已存在"
 } else {
     if ((Test-Path $InstallDir) -and (Get-ChildItem -Force $InstallDir | Select-Object -First 1)) {
         Fail "目录非空且不是 WebUI: $InstallDir"
     }
-    Invoke-GitClone "https://github.com/AUTOMATIC1111/stable-diffusion-webui.git" $InstallDir @("--branch", "dev")
-    Write-Ok "WebUI 已克隆"
+    if ($ForceZip) {
+        Write-Info "-ForceZip：跳过 git clone，使用 codeload ZIP"
+        if (Test-Path $InstallDir) { Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue }
+        Get-GitHubZip $WebUiZip $InstallDir
+        if (-not (Test-Path (Join-Path $InstallDir "launch.py"))) { Fail "ZIP 解压后找不到 launch.py: $InstallDir" }
+        $zipInstall = $true
+        Write-Ok "WebUI 已通过 ZIP 安装（固定提交 $WebUiCommit）"
+    } else {
+        try {
+            Invoke-GitClone "https://github.com/AUTOMATIC1111/stable-diffusion-webui.git" $InstallDir @("--branch", "dev")
+            Write-Ok "WebUI 已克隆"
+        } catch {
+            Write-Warn "git clone 失败，改用 GitHub ZIP 下载..."
+            if (Test-Path $InstallDir) { Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction SilentlyContinue }
+            Get-GitHubZip $WebUiZip $InstallDir
+            if (-not (Test-Path (Join-Path $InstallDir "launch.py"))) { Fail "ZIP 解压后找不到 launch.py: $InstallDir" }
+            $zipInstall = $true
+            Write-Ok "WebUI 已通过 ZIP 安装（固定提交 $WebUiCommit）"
+        }
+    }
 }
-& $script:Git -C $InstallDir config core.longpaths true
+if (Test-Path (Join-Path $InstallDir ".git")) {
+    & $script:Git -C $InstallDir config core.longpaths true
+}
 
-if ($WebUiCommit) {
+if ($WebUiCommit -and -not $zipInstall -and (Test-Path (Join-Path $InstallDir ".git"))) {
     Write-Info "尝试固定到测试过的提交 $WebUiCommit"
-    $head = (& $script:Git -C $InstallDir rev-parse HEAD 2>$null | Select-Object -First 1)
+    $head = (& $script:Git -C $InstallDir rev-parse HEAD | Select-Object -First 1)
     if ($head -and $head.Trim().StartsWith($WebUiCommit)) {
         Write-Ok "WebUI 已是 $WebUiCommit"
     } else {
         $fetched = $false
-        & $script:Git -C $InstallDir fetch --depth 1 origin $WebUiCommit 2>$null
+        & $script:Git -C $InstallDir fetch --depth 1 origin $WebUiCommit
         if ($LASTEXITCODE -eq 0) {
             $fetched = $true
         } else {
@@ -356,7 +446,7 @@ if ($WebUiCommit) {
                 [Environment]::SetEnvironmentVariable($name, $null, "Process")
             }
             try {
-                & $script:Git -c http.proxy= -c https.proxy= -C $InstallDir fetch --depth 1 origin $WebUiCommit 2>$null
+                & $script:Git -c http.proxy= -c https.proxy= -C $InstallDir fetch --depth 1 origin $WebUiCommit
                 if ($LASTEXITCODE -eq 0) { $fetched = $true }
             } finally {
                 foreach ($name in $saved.Keys) {
@@ -365,7 +455,7 @@ if ($WebUiCommit) {
             }
         }
         if ($fetched) {
-            & $script:Git -C $InstallDir checkout --detach $WebUiCommit 2>$null
+            & $script:Git -C $InstallDir checkout --detach $WebUiCommit
             if ($LASTEXITCODE -eq 0) { Write-Ok "已切换到 $WebUiCommit" }
             else { Write-Warn "无法切换提交，继续使用 dev 最新版。" }
         } else {
@@ -381,11 +471,14 @@ Update-PythonPath
 # 5. PyTorch
 # ---------------------------------------------------------------------------
 Write-Step "安装 PyTorch 2.7"
-$torchProbe = & $Python -c "import json, torch; d={'v': torch.__version__, 'cuda': torch.cuda.is_available()}; print(json.dumps(d))" 2>$null
+$probe = Invoke-PythonProbe "import json, torch; d={'v': torch.__version__, 'cuda': torch.cuda.is_available()}; print(json.dumps(d))"
 $torchOk = $false
 $torchInfo = $null
-if ($LASTEXITCODE -eq 0 -and $torchProbe) {
-    try { $torchInfo = $torchProbe | ConvertFrom-Json } catch { }
+if ($probe.ExitCode -eq 0) {
+    $json = Get-JsonLine $probe.Output
+    if ($json) {
+        try { $torchInfo = $json | ConvertFrom-Json } catch { }
+    }
 }
 if ($torchInfo) {
     Write-Info "已安装 torch $($torchInfo.v) (CUDA: $($torchInfo.cuda))"
@@ -403,9 +496,11 @@ if (-not $torchOk) {
         Invoke-Pip @("install", $TorchUrl, $TorchVisUrl, "--no-cache-dir", "--progress-bar", "off",
                      "--index-url", $PipIndex, "--trusted-host", $PipHost) "CUDA 12.8 torch"
     }
-    $torchProbe = & $Python -c "import json, torch; d={'v': torch.__version__, 'cuda': torch.cuda.is_available()}; print(json.dumps(d))" 2>$null
-    if ($LASTEXITCODE -ne 0) { Fail "torch 安装后无法导入。" }
-    $torchInfo = $torchProbe | ConvertFrom-Json
+    $probe = Invoke-PythonProbe "import json, torch; d={'v': torch.__version__, 'cuda': torch.cuda.is_available()}; print(json.dumps(d))"
+    if ($probe.ExitCode -ne 0) { Fail "torch 安装后无法导入。`n$($probe.Output)" }
+    $json = Get-JsonLine $probe.Output
+    if (-not $json) { Fail "torch 安装后无法读取版本信息。`n$($probe.Output)" }
+    $torchInfo = $json | ConvertFrom-Json
     if (-not $Cpu -and -not $torchInfo.cuda) {
         Fail "torch 已安装，但 CUDA 不可用。请更新 NVIDIA 驱动到 570+，或使用 -Cpu。"
     }
@@ -439,16 +534,48 @@ New-Item -ItemType Directory -Force -Path $extRoot | Out-Null
 
 $adDir = Join-Path $extRoot "sd-webui-animatediff"
 if (-not (Test-Path (Join-Path $adDir "scripts\animatediff.py"))) {
-    Invoke-GitClone "https://github.com/continue-revolution/sd-webui-animatediff.git" $adDir @("--branch", "master")
-    Write-Ok "AnimateDiff 扩展已安装"
+    if ($ForceZip) {
+        Write-Info "-ForceZip：使用 codeload ZIP 安装 AnimateDiff"
+        if (Test-Path $adDir) { Remove-Item -LiteralPath $adDir -Recurse -Force -ErrorAction SilentlyContinue }
+        Get-GitHubZip $AdZip $adDir
+        if (-not (Test-Path (Join-Path $adDir "scripts\animatediff.py"))) { Fail "AnimateDiff ZIP 解压失败: $adDir" }
+        Write-Ok "AnimateDiff 扩展已通过 ZIP 安装"
+    } else {
+        try {
+            Invoke-GitClone "https://github.com/continue-revolution/sd-webui-animatediff.git" $adDir @("--branch", "master")
+            Write-Ok "AnimateDiff 扩展已安装"
+        } catch {
+            Write-Warn "git clone 失败，改用 GitHub ZIP 下载 AnimateDiff..."
+            if (Test-Path $adDir) { Remove-Item -LiteralPath $adDir -Recurse -Force -ErrorAction SilentlyContinue }
+            Get-GitHubZip $AdZip $adDir
+            if (-not (Test-Path (Join-Path $adDir "scripts\animatediff.py"))) { Fail "AnimateDiff ZIP 解压失败: $adDir" }
+            Write-Ok "AnimateDiff 扩展已通过 ZIP 安装"
+        }
+    }
 } else {
     Write-Ok "AnimateDiff 扩展已存在"
 }
 
 $zhDir = Join-Path $extRoot "stable-diffusion-webui-localization-zh_CN"
 if (-not (Test-Path (Join-Path $zhDir "localizations\zh_CN.json"))) {
-    Invoke-GitClone "https://github.com/dtlnor/stable-diffusion-webui-localization-zh_CN.git" $zhDir @("--branch", "Anne")
-    Write-Ok "中文语言包已安装"
+    if ($ForceZip) {
+        Write-Info "-ForceZip：使用 codeload ZIP 安装中文语言包"
+        if (Test-Path $zhDir) { Remove-Item -LiteralPath $zhDir -Recurse -Force -ErrorAction SilentlyContinue }
+        Get-GitHubZip $ZhZip $zhDir
+        if (-not (Test-Path (Join-Path $zhDir "localizations\zh_CN.json"))) { Fail "中文语言包 ZIP 解压失败: $zhDir" }
+        Write-Ok "中文语言包已通过 ZIP 安装"
+    } else {
+        try {
+            Invoke-GitClone "https://github.com/dtlnor/stable-diffusion-webui-localization-zh_CN.git" $zhDir @("--branch", "Anne")
+            Write-Ok "中文语言包已安装"
+        } catch {
+            Write-Warn "git clone 失败，改用 GitHub ZIP 下载中文语言包..."
+            if (Test-Path $zhDir) { Remove-Item -LiteralPath $zhDir -Recurse -Force -ErrorAction SilentlyContinue }
+            Get-GitHubZip $ZhZip $zhDir
+            if (-not (Test-Path (Join-Path $zhDir "localizations\zh_CN.json"))) { Fail "中文语言包 ZIP 解压失败: $zhDir" }
+            Write-Ok "中文语言包已通过 ZIP 安装"
+        }
+    }
 } else {
     Write-Ok "中文语言包已存在"
 }
