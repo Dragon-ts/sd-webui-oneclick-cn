@@ -311,9 +311,11 @@ if ($gitCommand) {
     }
 }
 if (-not $script:Git) {
-    Fail "未找到 Git。请先安装 Git for Windows: https://git-scm.com/download/win"
+    Write-Warn "未找到 Git，自动改用 codeload ZIP 模式（无需 Git）。"
+    $ForceZip = $true
+} else {
+    Write-Ok "Git: $script:Git"
 }
-Write-Ok "Git: $script:Git"
 
 $gpuName = $null
 $driver = $null

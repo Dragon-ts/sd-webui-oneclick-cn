@@ -2,7 +2,7 @@
 
 在 Windows 上一次性装好 **AUTOMATIC1111 Stable Diffusion WebUI + AnimateDiff V2 + 简体中文界面** 的安装脚本。
 
-不需要预装 Python，不需要手动编译，不需要从 GitHub 下载几 GB 的整合包。脚本会使用便携版 Python 3.10.11，从国内镜像下载 PyTorch、模型和扩展。
+不需要预装 Python 或 Git，不需要手动编译，不需要从 GitHub 下载几 GB 的整合包。脚本会使用便携版 Python 3.10.11，从国内镜像下载 PyTorch、模型和扩展；没有 Git 时自动用 codeload ZIP 获取 WebUI 和扩展。
 
 > 已在 **Windows 11 / RTX 5070 Laptop 8GB / NVIDIA 617.42 / Python 3.10.11** 上完整跑通：
 > 文生图 512×512、AnimateDiff 8 帧 GIF、中文界面均已验证。
@@ -30,7 +30,7 @@
 ## 环境要求
 
 - Windows 10 1809+ / Windows 11，64 位
-- 已安装 [Git for Windows](https://git-scm.com/download/win)（脚本会调用 `git`）
+- [Git for Windows](https://git-scm.com/download/win)（可选；检测不到 Git 时会自动改用 codeload ZIP，无需手动安装）
 - PowerShell 5.1（Windows 自带）
 - 至少 **20 GB** 可用磁盘空间（推荐 25 GB）
 - NVIDIA 显卡与驱动：
