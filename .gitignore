@@ -1,0 +1,15 @@
+# Runtime / generated files
+_downloads/
+_cache/
+_python310/
+stable-diffusion-webui/
+start_sd.bat
+
+# Logs and Python caches
+*.log
+__pycache__/
+*.pyc
+.venv/
+
+# Local config (installer writes this into the WebUI directory)
+config/config.json
